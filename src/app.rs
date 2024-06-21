@@ -5,14 +5,11 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::{env, process};
 
-use cosmic::app::{message, Command, Core};
+use cosmic::app::{command::Command, message, Core};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{event, keyboard::Event as KeyEvent, window, Event, Subscription};
 use cosmic::iced_core::keyboard::{Key, Modifiers};
-use cosmic::widget::menu::{
-    action::MenuAction,
-    key_bind::{KeyBind, Modifier},
-};
+use cosmic::widget::menu::{action::MenuAction, key_bind::KeyBind};
 use cosmic::widget::segmented_button::{self, EntityMut, SingleSelect};
 use cosmic::{
     cosmic_config, cosmic_theme,
@@ -21,6 +18,8 @@ use cosmic::{
 };
 use cosmic::{widget, Application, Apply, Element};
 
+use cosmic_files::dialog::{Dialog, DialogKind, DialogMessage, DialogResult};
+
 use crate::app::config::{AppTheme, Repository, CONFIG_VERSION};
 use crate::app::key_bind::key_binds;
 use crate::fl;
@@ -28,16 +27,12 @@ use crate::fl;
 use self::icon_cache::IconCache;
 
 pub mod config;
-mod key_bind;
 pub mod icon_cache;
+mod key_bind;
 pub mod menu;
 pub mod settings;
 
-/// This is the struct that represents your application.
-/// It is used to define the data that will be used by your application.
 pub struct App {
-    /// This is the core of your application, it is used to communicate with the Cosmic runtime.
-    /// It is used to send messages to your application, and to access the resources of the Cosmic runtime.
     core: Core,
     nav_model: segmented_button::SingleSelectModel,
     selected_repository: Option<Repository>,
@@ -46,19 +41,18 @@ pub struct App {
     config: config::StellarshotConfig,
     context_page: ContextPage,
     dialog_pages: VecDeque<DialogPage>,
+    dialog_opt: Option<Dialog<Message>>,
     dialog_text_input: widget::Id,
     key_binds: HashMap<KeyBind, Action>,
     modifiers: Modifiers,
 }
 
-/// This is the enum that contains all the possible variants that your application will need to transmit messages.
-/// This is used to communicate between the different parts of your application.
-/// If your application does not need to send messages, you can use an empty enum or `()`.
 #[derive(Debug, Clone)]
 pub enum Message {
     DialogCancel,
     DialogComplete,
     DialogUpdate(DialogPage),
+    DialogMessage(DialogMessage),
     ToggleContextPage(ContextPage),
     LaunchUrl(String),
     AppTheme(usize),
@@ -73,6 +67,7 @@ pub enum Message {
     OpenCreateSnapshotDialog,
     DeleteRepositoryDialog,
     DeleteSnapshotDialog,
+    OpenFileResult(DialogResult),
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +241,7 @@ impl Application for App {
             config_handler: flags.config_handler,
             config: flags.config,
             dialog_pages: VecDeque::new(),
+            dialog_opt: None,
             dialog_text_input: widget::Id::unique(),
             key_binds: key_binds(),
             modifiers: Modifiers::empty(),
@@ -326,6 +322,13 @@ impl Application for App {
         Command::batch(commands)
     }
 
+    fn view_window(&self, window_id: window::Id) -> Element<Message> {
+        match &self.dialog_opt {
+            Some(dialog) => dialog.view(window_id),
+            None => widget::text("No dialog").into(),
+        }
+    }
+
     fn view(&self) -> Element<Self::Message> {
         let content: Element<Self::Message> = match &self.selected_repository {
             Some(repository) => {
@@ -347,7 +350,7 @@ impl Application for App {
         struct ConfigSubscription;
         struct ThemeSubscription;
 
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             event::listen_with(|event, status| match event {
                 Event::Keyboard(KeyEvent::KeyPressed { key, modifiers, .. }) => match status {
                     event::Status::Ignored => Some(Message::Key(modifiers, key)),
@@ -391,6 +394,11 @@ impl Application for App {
         ];
 
         // subscriptions.push(self.content.subscription().map(Message::Content));
+
+        match &self.dialog_opt {
+            Some(dialog) => subscriptions.push(dialog.subscription()),
+            None => {}
+        }
 
         Subscription::batch(subscriptions)
     }
@@ -436,9 +444,27 @@ impl Application for App {
                 self.set_context_title(context_page.title());
             }
             Message::OpenCreateRepositoryDialog => {
-                self.dialog_pages
-                    .push_back(DialogPage::CreateRepository(String::new()));
-                return widget::text_input::focus(self.dialog_text_input.clone());
+                if self.dialog_opt.is_none() {
+                    let (dialog, command) = Dialog::new(
+                        DialogKind::OpenMultipleFolders,
+                        None,
+                        Message::DialogMessage,
+                        Message::OpenFileResult,
+                    );
+                    self.dialog_opt = Some(dialog);
+                    return command;
+                }
+            }
+            Message::OpenFileResult(result) => {
+                self.dialog_opt = None;
+                match result {
+                    DialogResult::Cancel => {}
+                    DialogResult::Open(paths) => {
+                        for path in paths {
+                            println!("path: {:?}", path);
+                        }
+                    }
+                }
             }
             Message::OpenCreateSnapshotDialog => {
                 self.dialog_pages.push_back(DialogPage::CreateSnapshot);
@@ -513,6 +539,11 @@ impl Application for App {
                             return self.update(Message::CreateSnapshot);
                         }
                     }
+                }
+            }
+            Message::DialogMessage(dialog_message) => {
+                if let Some(dialog) = &mut self.dialog_opt {
+                    return dialog.update(dialog_message);
                 }
             }
             Message::DialogUpdate(dialog_page) => {
